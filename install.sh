@@ -5,26 +5,44 @@ RELEASE_REPO="${RELEASE_REPO:-sentiox/HarpyNet-Router}"
 REPO="https://api.github.com/repos/${RELEASE_REPO}/releases/latest"
 RELEASE_PAGE="https://github.com/${RELEASE_REPO}/releases"
 DOWNLOAD_DIR="/tmp/harpynet"
+CONFIG_PATH="/etc/config/harpynet"
 COUNT=3
 
-# Cached flag to switch between ipk or apk package managers
+CONFIG_BACKUP=""
 PKG_IS_APK=0
 command -v apk >/dev/null 2>&1 && PKG_IS_APK=1
-
-rm -rf "$DOWNLOAD_DIR"
-mkdir -p "$DOWNLOAD_DIR"
 
 msg() {
     printf "\033[32;1m%s\033[0m\n" "$1"
 }
 
-pkg_is_installed () {
+warn() {
+    printf "\033[33;1m%s\033[0m\n" "$1"
+}
+
+backup_config() {
+    if [ -n "$CONFIG_BACKUP" ]; then
+        return
+    fi
+
+    if [ -f "$CONFIG_PATH" ]; then
+        CONFIG_BACKUP="/tmp/harpynet-config-backup-$(date +%s)"
+        cp -p "$CONFIG_PATH" "$CONFIG_BACKUP"
+        msg "Existing HarpyNet config saved: $CONFIG_BACKUP"
+    fi
+}
+
+restore_config() {
+    if [ -n "$CONFIG_BACKUP" ] && [ -f "$CONFIG_BACKUP" ]; then
+        cp -p "$CONFIG_BACKUP" "$CONFIG_PATH"
+        msg "Existing HarpyNet config restored. Settings were not reset."
+    fi
+}
+
+pkg_is_installed() {
     local pkg_name="$1"
 
     if [ "$PKG_IS_APK" -eq 1 ]; then
-        # grep -q should work without change based on example from documentation
-        # apk list --installed --providers dnsmasq
-        # <dnsmasq> dnsmasq-full-2.90-r3 x86_64 {feeds/base/package/network/services/dnsmasq} (GPL-2.0) [installed]
         apk list --installed | grep -q "$pkg_name"
     else
         opkg list-installed | grep -q "$pkg_name"
@@ -35,8 +53,6 @@ pkg_remove() {
     local pkg_name="$1"
 
     if [ "$PKG_IS_APK" -eq 1 ]; then
-        # TODO: check --force-depends flag
-        # Nothing here: https://openwrt.org/docs/guide-user/additional-software/opkg-to-apk-cheatsheet
         apk del "$pkg_name"
     else
         opkg remove --force-depends "$pkg_name"
@@ -55,76 +71,15 @@ pkg_install() {
     local pkg_file="$1"
 
     if [ "$PKG_IS_APK" -eq 1 ]; then
-        # Can't install without flag based on info from documentation
-        # If you're installing a non-standard (self-built) package, use the --allow-untrusted option:
         apk add --allow-untrusted "$pkg_file"
     else
         opkg install "$pkg_file"
     fi
 }
 
-update_config() {
-    printf "\033[48;5;196m\033[1m╔══════════════════════════════════════════════════════════════════════╗\033[0m\n"
-    printf "\033[48;5;196m\033[1m║ ! Обнаружена старая версия harpynet.                                   ║\033[0m\n"
-    printf "\033[48;5;196m\033[1m║ Если продолжите обновление, вам потребуется настроить HarpyNet заново. ║\033[0m\n"
-    printf "\033[48;5;196m\033[1m║ Старая конфигурация будет сохранена в /etc/config/harpynet-070         ║\033[0m\n"
-    printf "\033[48;5;196m\033[1m║ Подробности: https://github.com/sentiox/HarpyNet-Router/releases       ║\033[0m\n"
-    printf "\033[48;5;196m\033[1m║ Точно хотите продолжить?                                             ║\033[0m\n"
-    printf "\033[48;5;196m\033[1m╚══════════════════════════════════════════════════════════════════════╝\033[0m\n"
-
-    echo ""
-
-    printf "\033[48;5;196m\033[1m╔══════════════════════════════════════════════════════════════════════╗\033[0m\n"
-    printf "\033[48;5;196m\033[1m║ ! Detected old harpynet version.                                       ║\033[0m\n"
-    printf "\033[48;5;196m\033[1m║ If you continue the update, you will need to RECONFIGURE harpynet.     ║\033[0m\n"
-    printf "\033[48;5;196m\033[1m║ Your old configuration will be saved to /etc/config/harpynet-070       ║\033[0m\n"
-    printf "\033[48;5;196m\033[1m║ Details: https://github.com/sentiox/HarpyNet-Router/releases           ║\033[0m\n"
-    printf "\033[48;5;196m\033[1m║ Are you sure you want to continue?                                   ║\033[0m\n"
-    printf "\033[48;5;196m\033[1m╚══════════════════════════════════════════════════════════════════════╝\033[0m\n"
-
-    msg "Continue? (yes/no)"
-
-    while true; do
-            read -r -p '' CONFIG_UPDATE
-            case $CONFIG_UPDATE in
-
-            yes|y|Y)
-                cp /etc/config/harpynet /etc/config/harpynet-070
-                msg "HarpyNet config has NOT been reset. Backup saved in /etc/config/harpynet-070"
-                break
-                ;;
-            *)
-                msg "Exit"
-                exit 1
-                ;;
-        esac
-    done
-}
-
-main() {
-    check_system
-    sing_box
-
-    /usr/sbin/ntpd -q -p 194.190.168.1 -p 216.239.35.0 -p 216.239.35.4 -p 162.159.200.1 -p 162.159.200.123
-
-    pkg_list_update || { echo "Packages list update failed"; exit 1; }
-
-    if [ -f "/etc/init.d/harpynet" ]; then
-        msg "HarpyNet is already installed. Upgrading..."
-    else
-        msg "Installing harpynet..."
-    fi
-
-    if command -v curl >/dev/null 2>&1; then
-        check_response=$(curl -s "$REPO")
-
-        if echo "$check_response" | grep -q 'API rate limit '; then
-            msg "You've reached the GitHub rate limit. Repeat in five minutes."
-            exit 1
-        fi
-    fi
-
+download_packages() {
     local grep_url_pattern
+
     if [ "$PKG_IS_APK" -eq 1 ]; then
         grep_url_pattern='https://[^"[:space:]]*\.apk'
     else
@@ -134,31 +89,36 @@ main() {
     wget -qO- "$REPO" | grep -o "$grep_url_pattern" | while read -r url; do
         filename=$(basename "$url")
         filepath="$DOWNLOAD_DIR/$filename"
-
         attempt=0
-        while [ $attempt -lt $COUNT ]; do
-            msg "Download $filename (count $((attempt+1)))..."
+
+        while [ "$attempt" -lt "$COUNT" ]; do
+            msg "Download $filename (count $((attempt + 1)))..."
             if wget -q -O "$filepath" "$url"; then
                 if [ -s "$filepath" ]; then
                     msg "$filename successfully downloaded"
                     break
                 fi
             fi
-            msg "Download error for $filename. Retrying..."
+            warn "Download error for $filename. Retrying..."
             rm -f "$filepath"
-            attempt=$((attempt+1))
+            attempt=$((attempt + 1))
         done
 
-        if [ $attempt -eq $COUNT ]; then
-            msg "Failed to download $filename after $COUNT attempts"
+        if [ "$attempt" -eq "$COUNT" ]; then
+            warn "Failed to download $filename after $COUNT attempts"
         fi
     done
 
-    # Check if any files were downloaded
     if ! ls "$DOWNLOAD_DIR"/*harpynet* >/dev/null 2>&1; then
-        msg "No packages were downloaded successfully"
+        warn "No packages were downloaded successfully"
         exit 1
     fi
+}
+
+install_core_packages() {
+    local pkg
+    local file
+    local f
 
     for pkg in harpynet luci-app-harpynet; do
         file=""
@@ -168,12 +128,19 @@ main() {
                 break
             fi
         done
+
         if [ -n "$file" ]; then
             msg "Installing $file..."
             pkg_install "$DOWNLOAD_DIR/$file"
             sleep 3
         fi
     done
+}
+
+install_translation() {
+    local ru
+    local f
+    local answer
 
     ru=""
     for f in "$DOWNLOAD_DIR"/luci-i18n-harpynet-ru*; do
@@ -182,101 +149,98 @@ main() {
             break
         fi
     done
-    if [ -n "$ru" ]; then
-        if pkg_is_installed luci-i18n-harpynet-ru; then
-                msg "Upgrading Russian translation..."
-                pkg_remove luci-i18n-harpynet*
-                pkg_install "$DOWNLOAD_DIR/$ru"
-        else
-            msg "Русский язык интерфейса ставим? y/n (Install the Russian interface language?)"
-            while true; do
-                read -r -p '' RUS
-                case $RUS in
-                y)
-                    pkg_remove luci-i18n-harpynet*
-                    pkg_install "$DOWNLOAD_DIR/$ru"
-                    break
-                    ;;
-                n)
-                    break
-                    ;;
-                *)
-                    echo "Введите y или n"
-                    ;;
-                esac
-            done
-        fi
+
+    if [ -z "$ru" ]; then
+        return
     fi
 
-    find "$DOWNLOAD_DIR" -type f -name '*harpynet*' -exec rm {} \;
+    if pkg_is_installed luci-i18n-harpynet-ru; then
+        msg "Upgrading Russian translation..."
+        pkg_remove luci-i18n-harpynet*
+        pkg_install "$DOWNLOAD_DIR/$ru"
+        return
+    fi
+
+    msg "Install Russian interface language? y/n"
+    while true; do
+        read -r -p '' answer
+        case "$answer" in
+            y|Y|yes|YES)
+                pkg_remove luci-i18n-harpynet*
+                pkg_install "$DOWNLOAD_DIR/$ru"
+                break
+                ;;
+            n|N|no|NO)
+                break
+                ;;
+            *)
+                msg "Enter y or n"
+                ;;
+        esac
+    done
 }
 
 check_system() {
-    # Get router model
-    MODEL=$(cat /tmp/sysinfo/model)
-    msg "Router model: $MODEL"
+    local model
+    local openwrt_version
+    local available_space
+    local required_space
+    local version
+    local major
+    local minor
+    local patch
 
-    # Check OpenWrt version
-    openwrt_version=$(cat /etc/openwrt_release | grep DISTRIB_RELEASE | cut -d"'" -f2 | cut -d'.' -f1)
+    model=$(cat /tmp/sysinfo/model)
+    msg "Router model: $model"
+
+    openwrt_version=$(grep DISTRIB_RELEASE /etc/openwrt_release | cut -d"'" -f2 | cut -d'.' -f1)
     if [ "$openwrt_version" = "23" ]; then
-        msg "OpenWrt 23.05 не поддерживается начиная с harpynet 0.5.0"
-        msg "Для OpenWrt 23.05 используйте harpynet версии 0.4.11 или устанавливайте зависимости и harpynet вручную"
-        msg "Подробности: $RELEASE_PAGE"
+        warn "OpenWrt 23.05 is not supported by current HarpyNet releases."
+        warn "Use HarpyNet 0.4.11 for OpenWrt 23.05, or install dependencies manually."
+        warn "Details: $RELEASE_PAGE"
         exit 1
     fi
 
-    # Check available space
-    AVAILABLE_SPACE=$(df /overlay | awk 'NR==2 {print $4}')
-    REQUIRED_SPACE=15360 # 15MB in KB
-
-    if [ "$AVAILABLE_SPACE" -lt "$REQUIRED_SPACE" ]; then
-        msg "Error: Insufficient space in flash"
-        msg "Available: $((AVAILABLE_SPACE/1024))MB"
-        msg "Required: $((REQUIRED_SPACE/1024))MB"
+    available_space=$(df /overlay | awk 'NR==2 {print $4}')
+    required_space=15360
+    if [ "$available_space" -lt "$required_space" ]; then
+        warn "Error: Insufficient space in flash"
+        warn "Available: $((available_space / 1024))MB"
+        warn "Required: $((required_space / 1024))MB"
         exit 1
     fi
 
     if ! nslookup google.com >/dev/null 2>&1; then
-        msg "DNS is not working."
+        warn "DNS is not working."
         exit 1
     fi
 
-    # Check version
-    if command -v harpynet > /dev/null 2>&1; then
-        local version
-        version=$(/usr/bin/harpynet show_version 2> /dev/null)
+    if command -v harpynet >/dev/null 2>&1; then
+        version=$(/usr/bin/harpynet show_version 2>/dev/null | sed 's/^v//')
         if [ -n "$version" ]; then
-            version=$(echo "$version" | sed 's/^v//')
-            local major
-            local minor
-            local patch
             major=$(echo "$version" | cut -d. -f1)
             minor=$(echo "$version" | cut -d. -f2)
             patch=$(echo "$version" | cut -d. -f3)
 
-            # Compare version: must be >= 0.7.0
             if [ "$major" -gt 0 ] ||
-                [ "$major" -eq 0 ] && [ "$minor" -gt 7 ] ||
-                [ "$major" -eq 0 ] && [ "$minor" -eq 7 ] && [ "$patch" -ge 0 ]; then
+                { [ "$major" -eq 0 ] && [ "$minor" -gt 7 ]; } ||
+                { [ "$major" -eq 0 ] && [ "$minor" -eq 7 ] && [ "$patch" -ge 0 ]; }; then
                 msg "HarpyNet version >= 0.7.0"
-                break
             else
-                msg "HarpyNet version < 0.7.0"
-                update_config
+                warn "Old HarpyNet version detected. Settings will be preserved during upgrade."
+                backup_config
             fi
         else
-            msg "Unknown harpynet version"
-            update_config
+            warn "Unknown HarpyNet version. Settings will be preserved during upgrade."
+            backup_config
         fi
     fi
 
     if pkg_is_installed https-dns-proxy; then
-        msg "Conflicting package detected: https-dns-proxy. Remove?"
-
+        warn "Conflicting package detected: https-dns-proxy. Remove? yes/no"
         while true; do
-                read -r -p '' DNSPROXY
-                case $DNSPROXY in
-
+            read -r -p '' answer
+            case "$answer" in
                 yes|y|Y)
                     pkg_remove luci-app-https-dns-proxy
                     pkg_remove https-dns-proxy
@@ -287,12 +251,15 @@ check_system() {
                     msg "Exit"
                     exit 1
                     ;;
-        esac
-    done
+            esac
+        done
     fi
 }
 
 sing_box() {
+    local sing_box_version
+    local required_version
+
     if ! pkg_is_installed "^sing-box"; then
         return
     fi
@@ -301,11 +268,47 @@ sing_box() {
     required_version="1.12.4"
 
     if [ "$(printf '%s\n%s\n' "$sing_box_version" "$required_version" | sort -V | head -n 1)" != "$required_version" ]; then
-        msg "sing-box version $sing_box_version is older than the required version $required_version."
-        msg "Removing old version..."
+        warn "sing-box version $sing_box_version is older than required $required_version."
+        warn "Removing old version..."
         service harpynet stop
         pkg_remove sing-box
     fi
+}
+
+main() {
+    rm -rf "$DOWNLOAD_DIR"
+    mkdir -p "$DOWNLOAD_DIR"
+
+    check_system
+    sing_box
+
+    /usr/sbin/ntpd -q -p 194.190.168.1 -p 216.239.35.0 -p 216.239.35.4 -p 162.159.200.1 -p 162.159.200.123
+
+    pkg_list_update || { warn "Packages list update failed"; exit 1; }
+
+    if [ -f "/etc/init.d/harpynet" ]; then
+        msg "HarpyNet is already installed. Upgrading without resetting settings..."
+        backup_config
+        trap restore_config EXIT
+    else
+        msg "Installing HarpyNet..."
+    fi
+
+    if command -v curl >/dev/null 2>&1; then
+        check_response=$(curl -s "$REPO")
+        if echo "$check_response" | grep -q 'API rate limit '; then
+            warn "GitHub API rate limit reached. Repeat in five minutes."
+            exit 1
+        fi
+    fi
+
+    download_packages
+    install_core_packages
+    restore_config
+    install_translation
+
+    find "$DOWNLOAD_DIR" -type f -name '*harpynet*' -exec rm {} \;
+    msg "HarpyNet installation/update finished."
 }
 
 main
