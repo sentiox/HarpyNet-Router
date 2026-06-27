@@ -10,4 +10,10 @@ This repository intentionally contains only the router-facing installer and rele
 sh <(wget -O - https://raw.githubusercontent.com/sentiox/HarpyNet-Router/main/install.sh)
 ```
 
+## Uninstall
+
+```sh
+sh <(wget -O - https://raw.githubusercontent.com/sentiox/HarpyNet-Router/main/uninstall.sh)
+```
+
 Packages are published in GitHub Releases as `.ipk` and `.apk` files.
